@@ -1,0 +1,517 @@
+import os
+import glob
+import shutil
+import uuid
+import traceback
+import pandas as pd
+from decimal import Decimal, InvalidOperation
+from openpyxl import load_workbook
+from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.worksheet import Worksheet
+
+# --- CONFIGURAÇÕES E CONSTANTES ---
+VER = "5.14-refactored"
+
+MAPA_SIGLAS = {
+    'PBH': 'PBH', 'PBHAT': 'ATIVOS', 'PBHBL': 'BELOTUR', 'PBHBT': 'BHTRANS', 'PBHCM': 'CMBH',
+    'PBHFC': 'FMC', 'PBHFP': 'FPM', 'PBHHO': 'HOB', 'PBHPR': 'PRODABEL', 'PBHSL': 'SLU',
+    'PBHSD': 'SUDECAP', 'PBHSM': 'SUMOB', 'PBHUR': 'URBEL'
+}
+MAPA_NOMES_SIGLAS = {v: k for k, v in MAPA_SIGLAS.items()}
+
+COLUNAS_CSV = {
+    "empresa": "Empresa", "titulo_relac": "Título Relac.", "titulo": "Título",
+    "vencimento": "Vencimento", "nota": "Nº Nota", "contrato": "Contrato",
+    "competencia": "Competência", "ano": "Ano", "tipo": "Tipo",
+    "id_cliente": "Ident. Cliente", "cpf": "CNPJ/CPF", "nome_cliente": "Nome Cliente",
+    "valor": "Valor", "situacao": "Sit.", "matricula": "Matrícula"
+}
+
+STYLES = {
+    'yellow': PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid"),
+    'green': PatternFill(start_color="C6E0B4", end_color="C6E0B4", fill_type="solid"),
+    'light_green': PatternFill(start_color="E2F0D9", end_color="E2F0D9", fill_type="solid"),
+    'gray': PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid"),
+    'border_thin': Side(style='thin'),
+    'border_thick': Side(style='thick'),
+    'align_center': Alignment(horizontal='center', vertical='center', wrap_text=True)
+}
+
+# --- FUNÇÕES UTILITÁRIAS DE TEXTO/DADOS ---
+
+def only_digits(s: str | None) -> str:
+    if s is None: return ''
+    return ''.join(ch for ch in str(s) if ch.isdigit())
+
+def sci_or_str_to_intstr(x) -> str:
+    if x is None: return ''
+    s = str(x).strip().replace(' ', '').replace('"', '').replace(',', '.')
+    try:
+        if 'E' in s.upper():
+            return str(int(Decimal(s)))
+        return only_digits(s)
+    except InvalidOperation:
+        return only_digits(s)
+
+def excel_col_to_int(col_str: str) -> int:
+    num = 0
+    for char in col_str:
+        num = num * 26 + (ord(char.upper()) - ord('A')) + 1
+    return num - 1
+
+def safe_copy_for_read(path: str) -> str:
+    """Cria cópia temporária para evitar erro de permissão."""
+    base, ext = os.path.splitext(path)
+    tmp_path = f"{base}.__tmpread__.{uuid.uuid4().hex}{ext}"
+    shutil.copyfile(path, tmp_path)
+    return tmp_path
+
+# --- FUNÇÕES DE ESTILIZAÇÃO EXCEL ---
+
+def auto_ajuste_colunas(ws: Worksheet, df: pd.DataFrame, startcol=1, padding=6):
+    for idx, col in enumerate(df.columns, startcol):
+        series = df[col].astype(str)
+        max_len = max(series.map(len).max(), len(str(col))) if not series.empty else len(str(col))
+        ws.column_dimensions[get_column_letter(idx)].width = max_len + padding
+
+def style_merged_header(ws: Worksheet, r1, c1, r2, c2, text, fill, font=None):
+    ws.merge_cells(start_row=r1, start_column=c1, end_row=r2, end_column=c2)
+    cell = ws.cell(row=r1, column=c1)
+    cell.value = text
+    cell.fill = fill
+    cell.font = font if font else Font(bold=True)
+    cell.alignment = STYLES['align_center']
+    
+    border = Border(top=STYLES['border_thick'], left=STYLES['border_thick'], 
+                    right=STYLES['border_thick'], bottom=STYLES['border_thick'])
+    for row in ws.iter_rows(min_row=r1, max_row=r2, min_col=c1, max_col=c2):
+        for c in row: c.border = border
+
+def aplicar_estilos_tabela(ws: Worksheet, startrow, startcol, maxrow, maxcol, header_fill=None):
+    """Aplica bordas e estilos na tabela de dados."""
+    for r in range(startrow, maxrow + 1):
+        for c in range(startcol, maxcol + 1):
+            cell = ws.cell(row=r, column=c)
+            top = bottom = left = right = STYLES['border_thin']
+            
+            # Bordas externas grossas
+            if r == startrow: 
+                top = STYLES['border_thick']
+                cell.font = Font(bold=True)
+                if header_fill: cell.fill = header_fill
+            if r == maxrow: bottom = STYLES['border_thick']
+            if c == startcol: left = STYLES['border_thick']
+            if c == maxcol: right = STYLES['border_thick']
+            
+            cell.border = Border(left=left, right=right, top=top, bottom=bottom)
+            cell.alignment = STYLES['align_center']
+
+def format_special_columns(ws: Worksheet, header_row, text_cols=None, date_col_name=None):
+    """Aplica formatação de texto (@) e Data (dd/mm/yyyy) buscando pelo nome do cabeçalho."""
+    headers = {ws.cell(row=header_row, column=c).value: c for c in range(1, ws.max_column + 1)}
+    
+    # Formato Texto
+    if text_cols:
+        for name in text_cols:
+            col_idx = headers.get(name)
+            if col_idx:
+                for r in range(header_row + 1, ws.max_row + 1):
+                    ws.cell(row=r, column=col_idx).number_format = '@'
+
+    # Formato Data
+    if date_col_name:
+        col_idx = headers.get(date_col_name) or headers.get(date_col_name.upper())
+        if col_idx:
+            for r in range(header_row + 1, ws.max_row + 1):
+                ws.cell(row=r, column=col_idx).number_format = 'dd/mm/yyyy'
+
+def add_total_row(ws: Worksheet, col_name, value, df_cols, start_col=1, label_col_idx=None):
+    """Adiciona linha de total no final da tabela."""
+    row_idx = ws.max_row + 1
+    col_idx = df_cols.get_loc(col_name) + start_col + 1 # +1 pois get_loc é base 0 e excel base 1
+    
+    cell = ws.cell(row=row_idx, column=col_idx)
+    cell.value = value
+    cell.font = Font(bold=True)
+    cell.number_format = 'R$ #,##0.00'
+    cell.alignment = STYLES['align_center']
+    cell.border = Border(top=STYLES['border_thick'], bottom=STYLES['border_thick'], 
+                         left=STYLES['border_thick'], right=STYLES['border_thick'])
+    return row_idx
+
+# --- LÓGICA DE NEGÓCIO (TAREFAS) ---
+
+def load_and_prep_data():
+    """Localiza, carrega e limpa a base principal."""
+    padrao_xlsx = 'Adimplentes e Inadimplentes - *.xlsx'
+    padrao_csv = 'Adimplentes e Inadimplentes - *.csv'
+    
+    arquivos = glob.glob(padrao_xlsx) or glob.glob(padrao_csv)
+    if not arquivos:
+        raise FileNotFoundError("Nenhum arquivo 'Adimplentes e Inadimplentes' encontrado.")
+    
+    path = arquivos[0]
+    print(f"Lendo base: {path}")
+    
+    tmp = safe_copy_for_read(path)
+    try:
+        if path.endswith('.xlsx'):
+            df = pd.read_excel(tmp, dtype=str, keep_default_na=False)
+        else:
+            # Tenta separador ; depois ,
+            try:
+                df = pd.read_csv(tmp, sep=';', encoding='utf-8-sig', dtype=str, keep_default_na=False)
+                if df.shape[1] < 2: raise Exception
+            except:
+                df = pd.read_csv(tmp, sep=',', encoding='utf-8-sig', dtype=str, keep_default_na=False)
+    finally:
+        if os.path.exists(tmp): os.remove(tmp)
+
+    df.columns = df.columns.str.strip()
+    
+    # Normalizações
+    cols = COLUNAS_CSV
+    
+    # Renomear colunas
+    remap = {'Vencto': cols['vencimento'], 'Venc.': cols['vencimento'], 'VENCIMENTO': cols['vencimento']}
+    df.rename(columns=remap, inplace=True)
+    
+    # Valor Numerico
+    if cols['valor'] in df.columns:
+        df[cols['valor']] = (df[cols['valor']].astype(str).str.replace(',', '.', regex=False))
+        df[cols['valor']] = pd.to_numeric(df[cols['valor']], errors='coerce').fillna(0.0)
+    
+    # Matrícula e Chaves Normalizadas
+    if cols['matricula'] in df.columns:
+        df[cols['matricula']] = df[cols['matricula']].astype(str).str.split('/', n=1).str[0].str.strip()
+        
+    targets = [cols['nota'], cols['titulo_relac'], cols['id_cliente'], cols['titulo'], cols['cpf']]
+    for c in targets:
+        if c in df.columns:
+            df[c + '__norm'] = df[c].apply(sci_or_str_to_intstr)
+            
+    return df
+
+def generate_report_1_adimplencia(df_entidade, pasta_out, nome_entidade, comp_pasta, default_ven):
+    """Tarefa 1: Adimplentes e Inadimplentes."""
+    cols = COLUNAS_CSV
+    print(" - [1/3] Gerando Relatório de Adimplência...")
+    
+    df_inad = df_entidade[df_entidade[cols['situacao']] == 'LS'].copy()
+    nome_arq = f"{nome_entidade} - {'Adimplentes e Inadimplentes' if not df_inad.empty else 'Adimplentes'} - UNIMEDBH_{comp_pasta}.xlsx"
+    path = os.path.join(pasta_out, nome_arq)
+
+    with pd.ExcelWriter(path, engine='openpyxl') as writer:
+        # --- ABA ADIMPLENTES ---
+        df_ad = df_entidade[df_entidade[cols['situacao']] == 'LQ'].copy()
+        
+        # Tratamento data vencimento
+        if cols['vencimento'] in df_ad.columns:
+            vdt = pd.to_datetime(df_ad[cols['vencimento']], errors='coerce', dayfirst=True)
+            df_ad[cols['vencimento']] = vdt.dt.strftime('%d/%m/%Y')
+            if default_ven:
+                mask = df_ad[cols['vencimento']].isna() | (df_ad[cols['vencimento']] == '') | (df_ad[cols['vencimento']] == 'NaT')
+                df_ad.loc[mask, cols['vencimento']] = default_ven
+
+        # Limpar colunas técnicas
+        export_ad = df_ad.drop(columns=[c for c in df_ad.columns if '__norm' in c])
+        export_ad.to_excel(writer, sheet_name='ADIMPLENTES', index=False, startrow=1, startcol=1)
+        
+        ws = writer.sheets['ADIMPLENTES']
+        if not export_ad.empty:
+            aplicar_estilos_tabela(ws, 2, 2, 2 + len(export_ad), 1 + len(export_ad.columns), STYLES['green'])
+            auto_ajuste_colunas(ws, export_ad, startcol=2)
+            format_special_columns(ws, 2, [cols['nota'], cols['titulo_relac'], cols['id_cliente'], cols['titulo'], cols['cpf']], cols['vencimento'])
+            add_total_row(ws, cols['valor'], export_ad[cols['valor']].sum(), export_ad.columns)
+
+        # --- ABA INADIMPLENTES ---
+        if not df_inad.empty:
+            cols_view = [cols[k] for k in ['empresa','titulo','vencimento','nota','contrato','competencia','ano',
+                                           'tipo','id_cliente','cpf','nome_cliente','valor','situacao','matricula'] 
+                         if cols[k] in df_inad.columns]
+            export_inad = df_inad[cols_view].copy()
+            
+            # Data Vencimento
+            if cols['vencimento'] in export_inad.columns:
+                vdt = pd.to_datetime(export_inad[cols['vencimento']], errors='coerce', dayfirst=True)
+                export_inad[cols['vencimento']] = vdt.dt.strftime('%d/%m/%Y')
+                if default_ven:
+                     mask = export_inad[cols['vencimento']].isna() | (export_inad[cols['vencimento']] == '')
+                     export_inad.loc[mask, cols['vencimento']] = default_ven
+            
+            export_inad.to_excel(writer, sheet_name='INADIMPLENTES', index=False, startrow=2, startcol=1)
+            ws = writer.sheets['INADIMPLENTES']
+            
+            # Header Merged
+            header_txt = f"{nome_entidade} - COMPETÊNCIA {comp_pasta.replace('.', '/')} - INADIMPLENTES"
+            style_merged_header(ws, 1, 2, 1, len(export_inad.columns) + 1, header_txt, STYLES['yellow'], Font(bold=True, size=14))
+            
+            aplicar_estilos_tabela(ws, 3, 2, 3 + len(export_inad), 1 + len(export_inad.columns), STYLES['green'])
+            auto_ajuste_colunas(ws, export_inad, startcol=2)
+            format_special_columns(ws, 3, [cols['nota'], cols['id_cliente'], cols['titulo'], cols['cpf']], cols['vencimento'])
+            add_total_row(ws, cols['valor'], export_inad[cols['valor']].sum(), export_inad.columns)
+
+            # --- ABA CONSOLIDADO INAD ---
+            grp = df_inad.groupby(cols['cpf']).agg(
+                NOME=(cols['nome_cliente'], 'first'),
+                MATRICULA=(cols['matricula'], 'first'),
+                CARTEIRINHA=(cols['id_cliente'], 'first'),
+                VALOR=(cols['valor'], 'sum')
+            ).reset_index().rename(columns={cols['cpf']: 'CPF'})
+            
+            export_cons = grp[['NOME', 'MATRICULA', 'CPF', 'CARTEIRINHA', 'VALOR']]
+            export_cons.to_excel(writer, sheet_name='CONSOLIDADO DE INADIMPLENTES', index=False, startrow=2, startcol=1)
+            
+            ws = writer.sheets['CONSOLIDADO DE INADIMPLENTES']
+            header_cons = f"INADIMPLENTES CONSOLIDADOS UNIMED - COMPETÊNCIA {comp_pasta.replace('.', '/')}"
+            style_merged_header(ws, 1, 2, 1, len(export_cons.columns) + 1, header_cons, STYLES['yellow'], Font(bold=True, size=14))
+            
+            aplicar_estilos_tabela(ws, 3, 2, 3 + len(export_cons), 1 + len(export_cons.columns), STYLES['green'])
+            auto_ajuste_colunas(ws, export_cons, startcol=2)
+            format_special_columns(ws, 3, ['CPF', 'CARTEIRINHA'])
+            add_total_row(ws, 'VALOR', export_cons['VALOR'].sum(), export_cons.columns)
+
+def generate_report_2_composicao(df_entidade, pasta_out, nome_entidade, comp_pasta, path_analitico):
+    """Tarefa 2: Composição Final."""
+    if not path_analitico:
+        print(" - [2/3] Pulando Composição (Analítico não encontrado).")
+        return
+
+    print(" - [2/3] Gerando Composição Final...")
+    cols = COLUNAS_CSV
+    
+    # Ler Analítico
+    dff = pd.read_excel(path_analitico, header=3, dtype={'CONTRATO': str, 'Nº NOTA': str, 'TITULO': str})
+    dff.columns = dff.columns.str.strip().str.upper()
+    dff.rename(columns={'TIPO DE COBRANÇA': 'TIPO', 'Nº NOTA': 'Nº Nota', 'TITULO': 'Título'}, inplace=True)
+    
+    # Tratamento datas e chaves
+    if 'VENCIMENTO' in dff.columns:
+        dff['VENCIMENTO'] = pd.to_datetime(dff['VENCIMENTO'], format='%d/%m/%Y', dayfirst=True, errors='coerce').dt.strftime('%d/%m/%Y').fillna('')
+    
+    dff.dropna(subset=['CONTRATO', 'Nº Nota'], how='all', inplace=True)
+    dff['Nº Nota__norm'] = dff['Nº Nota'].apply(sci_or_str_to_intstr)
+    dff['Título__norm'] = dff['Título'].apply(sci_or_str_to_intstr)
+    
+    # Cruzamento com LQ (Adimplentes) da base
+    df_lq = df_entidade[df_entidade[cols['situacao']] == 'LQ'].copy()
+    if not df_lq.empty:
+        df_lq['Nº Nota__norm'] = df_lq[cols['nota'] + '__norm']
+        df_lq['Título__norm'] = df_lq[cols['titulo_relac'] + '__norm']
+        
+        df_pag = df_lq.groupby(['Nº Nota__norm', 'Título__norm'])[cols['valor']].sum().reset_index(name='ADIMPLENTES')
+        cmp = pd.merge(dff, df_pag, on=['Nº Nota__norm', 'Título__norm'], how='left')
+    else:
+        cmp = dff.copy()
+        cmp['ADIMPLENTES'] = 0.0
+
+    cmp['ADIMPLENTES'] = cmp['ADIMPLENTES'].fillna(0.0)
+    for c in ['MNC', 'MNC < 20,00']: 
+        if c in cmp.columns: cmp[c] = pd.to_numeric(cmp[c], errors='coerce').fillna(0.0)
+        
+    if 'MNC' in cmp.columns: cmp['INADIMPLÊNCIA'] = cmp['MNC'] - cmp['ADIMPLENTES']
+    cmp['COMPETÊNCIA'] = comp_pasta.replace('.', '/')
+    
+    # Export
+    targets = ['COMPETÊNCIA', 'TIPO', 'CONTRATO', 'Nº Nota', 'Título', 'VENCIMENTO', 'MNC', 'ADIMPLENTES', 'INADIMPLÊNCIA', 'MNC < 20,00']
+    final_cols = [c for c in targets if c in cmp.columns]
+    df_out = cmp[final_cols].copy()
+    
+    # Linha total
+    total_vals = df_out[['MNC', 'ADIMPLENTES', 'INADIMPLÊNCIA', 'MNC < 20,00']].sum()
+    df_out_w_total = pd.concat([df_out, pd.DataFrame(total_vals).T], ignore_index=True).fillna('')
+    
+    path = os.path.join(pasta_out, f"{nome_entidade} - Composição Final - UNIMEDBH_{comp_pasta}.xlsx")
+    df_out_w_total.to_excel(path, sheet_name=nome_entidade, index=False, startrow=6)
+    
+    # Formatação Visual
+    wb = load_workbook(path); ws = wb.active; ws.insert_cols(1)
+    
+    style_merged_header(ws, 1, 2, 1, len(df_out.columns)+1, f'{nome_entidade} - COMPOSIÇÃO FINAL', STYLES['green'], Font(bold=True, size=16))
+    style_merged_header(ws, 2, 2, 2, len(df_out.columns)+1, 'UNIMED BH', STYLES['green'], Font(bold=True, size=12))
+    ws['B4'] = 'COMPETÊNCIA:'; ws['B4'].font = Font(bold=True); ws['C4'] = comp_pasta.replace('.', '/')
+    
+    aplicar_estilos_tabela(ws, 7, 2, 7+len(df_out), 1+len(df_out.columns), STYLES['green'])
+    auto_ajuste_colunas(ws, df_out_w_total, startcol=2, padding=8)
+    format_special_columns(ws, 7, ['Nº Nota', 'Título'], 'VENCIMENTO')
+    
+    # Formatação Financeira na coluna inteira
+    for i, col in enumerate(df_out.columns, 2):
+        if col in ['MNC', 'ADIMPLENTES', 'INADIMPLÊNCIA', 'MNC < 20,00']:
+            for r in range(8, ws.max_row + 1): ws.cell(row=r, column=i).number_format = 'R$ #,##0.00'
+            
+    # Estiliza última linha (Total)
+    row_total = ws.max_row
+    for i in range(2, ws.max_column + 1):
+        cell = ws.cell(row=row_total, column=i)
+        cell.border = Border(top=STYLES['border_thick'], bottom=STYLES['border_thick'])
+        if i == 2: cell.border = Border(top=STYLES['border_thick'], bottom=STYLES['border_thick'], left=STYLES['border_thick'])
+        if i == ws.max_column: cell.border = Border(top=STYLES['border_thick'], bottom=STYLES['border_thick'], right=STYLES['border_thick'])
+        cell.font = Font(bold=True)
+
+def generate_report_3_residuos(df_entidade, pasta_out, nome_entidade, comp_pasta, path_analitico, mes_txt):
+    """Tarefa 3: Resíduos MNC < 20."""
+    if not path_analitico: return
+
+    try:
+        cols_idx = {4: 'CARTAO_UNIMED', 6: 'MATRICULA_BENEF', 7: 'CONTRATO', 28: 'Retorno_Vl_NC', 
+                    40: 'CODIGO_VERBA', 42: 'CPF', 43: 'Vl_Minimo_MNC', 44: 'NOME_COMPLETO_TITULAR'}
+        
+        frames = []
+        for sheet in ['MENSALIDADES', 'COPART']:
+            try:
+                frames.append(pd.read_excel(path_analitico, sheet_name=sheet, header=None, skiprows=4, usecols=cols_idx.keys()))
+            except: pass
+            
+        if not frames: return
+        df_full = pd.concat(frames, ignore_index=True).rename(columns=cols_idx)
+        
+        # Filtros Lógica Resíduo
+        df_full['Retorno_Vl_NC'] = pd.to_numeric(df_full['Retorno_Vl_NC'], errors='coerce').fillna(0)
+        mask = (df_full['Retorno_Vl_NC'] > 0)
+        if 'Vl_Minimo_MNC' in df_full.columns:
+            mask = mask & (df_full['Vl_Minimo_MNC'].astype(str).str.strip().str.upper() == 'S')
+            
+        df_res = df_full[mask].copy()
+        if df_res.empty: return
+        
+        print(f" - [3/3] Gerando Relatório Resíduos ({len(df_res)} registros)...")
+        
+        # Preparação dados
+        cols = COLUNAS_CSV
+        df_res['CONTRATO_NORM'] = df_res['CONTRATO'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lstrip('0')
+        
+        # Cruzamento para achar Nota Fiscal
+        df_ab = df_entidade[df_entidade[cols['situacao']] == 'AB'].copy()
+        df_ab['CONTRATO_NORM'] = df_ab[cols['contrato']].astype(str).str.replace(r'\.0$', '', regex=True).str.strip().str.lstrip('0')
+        
+        sum_res = df_res.groupby('CONTRATO_NORM')['Retorno_Vl_NC'].sum().reset_index()
+        sum_ab = df_ab.groupby('CONTRATO_NORM').agg(VALOR=(cols['valor'], 'sum'), NOTA=(cols['nota'], 'first')).reset_index()
+        
+        merged = pd.merge(sum_res, sum_ab, on='CONTRATO_NORM', how='left')
+        merged['NOTA_FINAL'] = merged.apply(lambda x: x['NOTA'] if abs(x['Retorno_Vl_NC'] - x['VALOR']) < 0.015 else None, axis=1)
+        
+        df_res = pd.merge(df_res, merged[['CONTRATO_NORM', 'NOTA_FINAL']], on='CONTRATO_NORM', how='left')
+        
+        # Formatação final
+        df_res['COMPETÊNCIA'] = comp_pasta.replace('.', '/')
+        df_res['CARTEIRINHA'] = df_res['CARTAO_UNIMED'].astype(str).str.replace(r'\.0$', '', regex=True).str.zfill(18)
+        
+        aba1 = df_res.rename(columns={'MATRICULA_BENEF': 'MATRICULA', 'CPF': 'CPF BENEFICIÁRIO', 'CONTRATO': 'Nº CONTRATO',
+                                      'NOTA_FINAL': 'NOTA FISCAL', 'Retorno_Vl_NC': 'VALOR MNC < 20'})
+        aba1 = aba1[['COMPETÊNCIA', 'MATRICULA', 'CPF BENEFICIÁRIO', 'CARTEIRINHA', 'Nº CONTRATO', 'NOTA FISCAL', 'VALOR MNC < 20']]
+
+        # Aba 2 Consolidada
+        verbas = ['21U1', '21U2']
+        titulares = df_full[df_full['CODIGO_VERBA'].astype(str).str.strip().isin(verbas)].copy()
+        titulares['MATRICULA_BASE'] = titulares['MATRICULA_BENEF'].astype(str).str.split('/').str[0].str.strip()
+        titulares = titulares.drop_duplicates('MATRICULA_BASE')
+        
+        df_res['MATRICULA_BASE'] = df_res['MATRICULA_BENEF'].astype(str).str.split('/').str[0].str.strip()
+        grp = df_res.groupby('MATRICULA_BASE')['Retorno_Vl_NC'].sum().reset_index(name='VALOR MNC < 20')
+        
+        aba2 = pd.merge(grp, titulares, on='MATRICULA_BASE', how='left')
+        aba2['COMPETÊNCIA'] = comp_pasta.replace('.', '/')
+        aba2 = aba2.rename(columns={'MATRICULA_BASE': 'MATRICULA', 'CARTAO_UNIMED': 'CARTEIRINHA', 
+                                    'CPF': 'CPF TITULAR', 'NOME_COMPLETO_TITULAR': 'NOME TITULAR'})
+        aba2 = aba2[['COMPETÊNCIA', 'MATRICULA', 'CPF TITULAR', 'CARTEIRINHA', 'NOME TITULAR', 'VALOR MNC < 20']]
+
+        path = os.path.join(pasta_out, f"{nome_entidade} - Resíduos MNC menor que 20 - UNIMEDBH_{comp_pasta}.xlsx")
+        
+        with pd.ExcelWriter(path, engine='openpyxl') as writer:
+            header_txt = f"UNIMED - MNC < 20 - COMPETÊNCIA {mes_txt}"
+            
+            # Sheet 1
+            aba1.to_excel(writer, 'MNC < 20', index=False, startrow=1, startcol=1)
+            ws = writer.sheets['MNC < 20']
+            style_merged_header(ws, 1, 2, 1, len(aba1.columns)+1, header_txt, STYLES['gray'], Font(bold=True, size=12))
+            aplicar_estilos_tabela(ws, 2, 2, 2+len(aba1), 1+len(aba1.columns), STYLES['green'])
+            auto_ajuste_colunas(ws, aba1, startcol=2)
+            format_special_columns(ws, 2, ['MATRICULA', 'CPF BENEFICIÁRIO', 'CARTEIRINHA', 'Nº CONTRATO', 'NOTA FISCAL'])
+            add_total_row(ws, 'VALOR MNC < 20', aba1['VALOR MNC < 20'].sum(), aba1.columns)
+            
+            # Sheet 2
+            aba2.to_excel(writer, 'MNC < 20 CONSOLIDADO', index=False, startrow=1, startcol=1)
+            ws = writer.sheets['MNC < 20 CONSOLIDADO']
+            style_merged_header(ws, 1, 2, 1, len(aba2.columns)+1, header_txt, STYLES['gray'], Font(bold=True, size=12))
+            aplicar_estilos_tabela(ws, 2, 2, 2+len(aba2), 1+len(aba2.columns), STYLES['green'])
+            auto_ajuste_colunas(ws, aba2, startcol=2)
+            format_special_columns(ws, 2, ['MATRICULA', 'CPF TITULAR', 'CARTEIRINHA'])
+            add_total_row(ws, 'VALOR MNC < 20', aba2['VALOR MNC < 20'].sum(), aba2.columns)
+
+    except Exception as e:
+        print(f"Erro ao processar resíduos: {e}")
+
+# --- MAIN ---
+
+def main():
+    print(f"--- Iniciando Automação Completa ({VER}) ---")
+    
+    try:
+        # 1. Carregar Base
+        df = load_and_prep_data()
+        
+        # 2. Definir Pastas
+        mes_ref = str(df[COLUNAS_CSV['competencia']].iloc[0]).upper()
+        ano_ref = str(df[COLUNAS_CSV['ano']].iloc[0])
+        
+        mapa_mes = {'JANEIRO': '01', 'FEVEREIRO': '02', 'MARÇO': '03', 'MARCO': '03', 'ABRIL': '04', 
+                    'MAIO': '05', 'JUNHO': '06', 'JULHO': '07', 'AGOSTO': '08', 'SETEMBRO': '09', 
+                    'OUTUBRO': '10', 'NOVEMBRO': '11', 'DEZEMBRO': '12'}
+        
+        mes_num = mapa_mes.get(mes_ref, 'MM')
+        pasta_base = f"{mes_num}.{ano_ref}"Cálculo De Idade: Irmão E Pai
+        Analista de Dados: Visão de Negócios e Solução
+        Reescrevendo Experiência Profissional em Primeira Pessoa
+        Melhoria de Resposta de E-mail Profissional
+        Ajuda com Trabalho de Álgebra e Geometria
+        
+        
+        sufixo_analitico = f"{ano_ref}_{mes_num}"
+        
+        os.makedirs(pasta_base, exist_ok=True)
+        
+        entidades = sorted(df[COLUNAS_CSV['empresa']].dropna().unique())
+        print(f"Competência: {mes_ref}/{ano_ref} | Entidades: {len(entidades)}")
+        
+        # 3. Processar Entidades
+        for ent in entidades:
+            print(f"\n-> Processando: {ent}")
+            pasta_ent = os.path.join(pasta_base, ent)
+            os.makedirs(pasta_ent, exist_ok=True)
+            
+            df_ent = df[df[COLUNAS_CSV['empresa']] == ent].copy()
+            
+            # Buscar Analítico
+            sigla = MAPA_NOMES_SIGLAS.get(ent)
+            path_analitico = None
+            default_ven = ''
+            
+            if sigla:
+                busca = glob.glob(os.path.join('relatorios_analiticos', f'{sigla}*Relatório Analítico*{sufixo_analitico}.xlsx'))
+                if busca:
+                    path_analitico = busca[0]
+                    # Tentar pegar data vencimento do cabeçalho do analítico
+                    try:
+                        dh = pd.read_excel(path_analitico, header=3, nrows=5, usecols=lambda x: str(x).upper() == 'VENCIMENTO')
+                        if not dh.empty:
+                            v = pd.to_datetime(dh.iloc[:,0], dayfirst=True, errors='coerce').dropna()
+                            if not v.empty: default_ven = v.iloc[0].strftime('%d/%m/%Y')
+                    except: pass
+            
+            # Executar Tarefas
+            generate_report_1_adimplencia(df_ent, pasta_ent, ent, pasta_base, default_ven)
+            generate_report_2_composicao(df_ent, pasta_ent, ent, pasta_base, path_analitico)
+            generate_report_3_residuos(df_ent, pasta_ent, ent, pasta_base, path_analitico, f"{mes_ref}/{ano_ref}")
+            
+        print("\nSUCESSO: Todos os processos finalizados.")
+        
+    except Exception as e:
+        print("\nERRO CRÍTICO:")
+        traceback.print_exc()
+    
+    input("Pressione Enter para sair...")
+
+if __name__ == "__main__":
+    main()
