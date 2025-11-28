@@ -1,4 +1,9 @@
+Aviso de Privacidade: Este projeto foi desenvolvido seguindo as melhores práticas de LGPD. Nenhum dado financeiro real está contido neste repositório; os scripts de demonstração utilizam dados sintéticos gerados aleatoriamente.
 
+Desenvolvido Gustavo Henrique Santos Pinheiro
+
+
+```python
 import pandas as pd
 import os
 import random
