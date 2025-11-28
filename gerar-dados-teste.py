@@ -1,11 +1,4 @@
----
 
-### 5. O Script Gerador de Dados Fictícios (`gerar_dados_teste.py`)
-Esse é o "pulo do gato". Para quem visitar seu GitHub ver o código funcionando, você precisa criar arquivos falsos que tenham as mesmas colunas que seu código espera (`Empresa`, `Título Relac.`, etc.).
-
-Crie o arquivo `gerar_dados_teste.py` na raiz do projeto e cole o código abaixo. Eu fiz ele compatível com o código limpo que te mandei antes.
-
-```python
 import pandas as pd
 import os
 import random
