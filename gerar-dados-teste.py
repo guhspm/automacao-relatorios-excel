@@ -1,7 +1,13 @@
-Aviso de Privacidade: Este projeto foi desenvolvido seguindo as melhores práticas de LGPD. Nenhum dado financeiro real está contido neste repositório; os scripts de demonstração utilizam dados sintéticos gerados aleatoriamente.
+Aviso: Este código foi "higienizado" para remoção de dados sensíveis e adaptado para uso genérico em portfólio, respeitando as diretrizes da LGPD.
 
-Desenvolvido Gustavo Henrique Santos Pinheiro
+Desenvolvido por Gustavo Henrique Santos Pinheiro
 
+### 5. O Script Gerador de Dados Fictícios (`gerar_dados_teste.py`)
+Esse é o "pulo do gato". Para quem visitar seu GitHub ver o código funcionando, você precisa criar arquivos falsos que tenham as mesmas colunas que seu código espera (`Empresa`, `Título Relac.`, etc.).
+
+Crie o arquivo `gerar_dados_teste.py` na raiz do projeto e cole o código abaixo. Eu fiz ele compatível com o código limpo que te mandei antes.
+
+```python
 
 ```python
 import pandas as pd
